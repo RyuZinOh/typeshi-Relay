@@ -1,0 +1,22 @@
+# binaries
+typeshi-relay
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# test binaries
+*.test
+
+# go build cache / coverage output
+*.out
+
+# env
+.env
+
+# editor/OS cruft
+.vscode/
+.idea/
+*.swp
+.DS_Store
