@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/joho/godotenv"
@@ -36,6 +37,12 @@ type Envelope struct {
 	Type     string `json:"type"`
 	Room     string `json:"room"`
 	Username string `json:"username"`
+}
+type StartEnvelope struct {
+	Type     string `json:"type"`
+	Seed     int64  `json:"seed"`
+	StartAt  int64  `json:"startAt"`
+	Duration int    `json:"duration"`
 }
 
 func generateRoomCode() string {
@@ -70,6 +77,26 @@ func getRoom(code string) (*Room, bool) {
 	defer roomsMu.Unlock()
 	r, ok := rooms[code]
 	return r, ok
+}
+
+func broadcastStart(r *Room) {
+	seed := int64(rand.Int32())
+	startAt := time.Now().UnixMilli() + 3000
+
+	env := StartEnvelope{
+		Type:     "start",
+		Seed:     seed,
+		StartAt:  startAt,
+		Duration: 60,
+	}
+	data, _ := json.Marshal(env)
+	r.mu.Lock()
+	for c := range r.clients {
+		c.WriteMessage(websocket.TextMessage, data)
+	}
+	r.mu.Unlock()
+
+	log.Println("race starting in room: ", r.code, "seed:", seed)
 }
 
 func handleWS(w http.ResponseWriter, r *http.Request) {
@@ -183,6 +210,13 @@ func handleWS(w http.ResponseWriter, r *http.Request) {
 			room.mu.Unlock()
 
 			conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"joined"}`))
+			room.mu.Lock()
+			full := len(room.clients) >= maxPlayersPerRoom
+			room.mu.Unlock()
+
+			if full {
+				broadcastStart(room)
+			}
 
 			continue
 		}
