@@ -3,8 +3,11 @@ package main
 import (
 	"encoding/json"
 	"log"
+	"math/rand/v2"
 	"net/http"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/gorilla/websocket"
@@ -16,6 +19,7 @@ var upgrader = websocket.Upgrader{
 }
 
 const maxPlayersPerRoom = 2
+const roomCodeLength = 4
 
 type Room struct {
 	mu      sync.Mutex
@@ -34,15 +38,38 @@ type Envelope struct {
 	Username string `json:"username"`
 }
 
-func getOrCreateRoom(code string) *Room {
+func generateRoomCode() string {
+	roomsMu.Lock()
+	defer roomsMu.Unlock()
+
+	for {
+		var sb strings.Builder
+		for range roomCodeLength {
+			sb.WriteString(strconv.Itoa(rand.IntN(10)))
+		}
+		code := sb.String()
+		if _, exists := rooms[code]; !exists {
+			return code
+		}
+	}
+}
+
+func createRoom() *Room {
+	code := generateRoomCode()
+	r := &Room{clients: make(map[*websocket.Conn]string), code: code}
+
+	roomsMu.Lock()
+	rooms[code] = r
+	roomsMu.Unlock()
+
+	return r
+}
+
+func getRoom(code string) (*Room, bool) {
 	roomsMu.Lock()
 	defer roomsMu.Unlock()
 	r, ok := rooms[code]
-	if !ok {
-		r = &Room{clients: make(map[*websocket.Conn]string), code: code}
-		rooms[code] = r
-	}
-	return r
+	return r, ok
 }
 
 func handleWS(w http.ResponseWriter, r *http.Request) {
@@ -79,9 +106,33 @@ func handleWS(w http.ResponseWriter, r *http.Request) {
 			log.Println("Client disconnected: ", conn.RemoteAddr())
 			return
 		}
+
 		var env Envelope
 		if err := json.Unmarshal(msg, &env); err != nil {
 			log.Println("bad message: ", err)
+			continue
+		}
+
+		if env.Type == "create" {
+			if env.Username == "" {
+				conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"error","message":"username required"}`))
+				log.Println("create rejected: no username")
+				continue
+			}
+
+			r := createRoom()
+			r.mu.Lock()
+			r.clients[conn] = env.Username
+			r.mu.Unlock()
+
+			room = r
+			log.Println("room created: ", r.code, "by", env.Username)
+
+			var sb strings.Builder
+			sb.WriteString(`{"type":"created","room":"`)
+			sb.WriteString(r.code)
+			sb.WriteString(`"}`)
+			conn.WriteMessage(websocket.TextMessage, []byte(sb.String()))
 			continue
 		}
 
@@ -97,7 +148,13 @@ func handleWS(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 
-			r := getOrCreateRoom(env.Room)
+			r, exists := getRoom(env.Room)
+			if !exists {
+				conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"error","message":"room not found"}`))
+				log.Println("join rejected: room not found: ", env.Room)
+				continue
+			}
+
 			r.mu.Lock()
 			if len(r.clients) >= maxPlayersPerRoom {
 				r.mu.Unlock()
@@ -110,6 +167,23 @@ func handleWS(w http.ResponseWriter, r *http.Request) {
 
 			room = r
 			log.Println("client joined room: ", env.Room, "as", env.Username)
+
+			room.mu.Lock()
+			var jb strings.Builder
+			jb.WriteString(`{"type":"player_joined","username":"`)
+			jb.WriteString(env.Username)
+			jb.WriteString(`"}`)
+			joinedMsg := jb.String()
+			for c := range room.clients {
+				if c == conn {
+					continue
+				}
+				c.WriteMessage(websocket.TextMessage, []byte(joinedMsg))
+			}
+			room.mu.Unlock()
+
+			conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"joined"}`))
+
 			continue
 		}
 
@@ -121,7 +195,7 @@ func handleWS(w http.ResponseWriter, r *http.Request) {
 		room.mu.Lock()
 		username := room.clients[conn]
 
-		var payload map[string]interface{}
+		var payload map[string]any
 		if err := json.Unmarshal(msg, &payload); err != nil {
 			room.mu.Unlock()
 			log.Println("bad broadcast payload: ", err)
