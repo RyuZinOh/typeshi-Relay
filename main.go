@@ -26,6 +26,7 @@ type Room struct {
 	mu      sync.Mutex
 	clients map[*websocket.Conn]string
 	code    string
+	started bool
 }
 
 var (
@@ -91,6 +92,7 @@ func broadcastStart(r *Room) {
 	}
 	data, _ := json.Marshal(env)
 	r.mu.Lock()
+	r.started = true
 	for c := range r.clients {
 		c.WriteMessage(websocket.TextMessage, data)
 	}
@@ -183,6 +185,12 @@ func handleWS(w http.ResponseWriter, r *http.Request) {
 			}
 
 			r.mu.Lock()
+			if r.started {
+				r.mu.Unlock()
+				conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"error","message":"race already in progress"}`))
+				log.Println("join rejected: race already started: ", env.Room)
+				continue
+			}
 			if len(r.clients) >= maxPlayersPerRoom {
 				r.mu.Unlock()
 				conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"error","message":"room full"}`))
