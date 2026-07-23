@@ -23,10 +23,12 @@ const maxPlayersPerRoom = 2
 const roomCodeLength = 4
 
 type Room struct {
-	mu      sync.Mutex
-	clients map[*websocket.Conn]string
-	code    string
-	started bool
+	mu             sync.Mutex
+	clients        map[*websocket.Conn]string
+	code           string
+	started        bool
+	creator        *websocket.Conn
+	rematchPending bool
 }
 
 var (
@@ -171,6 +173,7 @@ func handleWS(w http.ResponseWriter, r *http.Request) {
 			r := createRoom()
 			r.mu.Lock()
 			r.clients[conn] = env.Username
+			r.creator = conn
 			r.mu.Unlock()
 
 			room = r
@@ -262,13 +265,57 @@ func handleWS(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			room.mu.Lock()
+			if conn != room.creator {
+				room.mu.Unlock()
+				conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"error","message":"only the room creator can request a rematch"}`))
+				continue
+			}
 			if len(room.clients) < maxPlayersPerRoom {
 				room.mu.Unlock()
 				conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"error","message":"opponent not connected"}`))
 				continue
 			}
+			room.rematchPending = true
+			offerMsg := []byte(`{"type":"rematch_offer"}`)
+			for c := range room.clients {
+				if c != conn {
+					c.WriteMessage(websocket.TextMessage, offerMsg)
+				}
+			}
+			room.mu.Unlock()
+			continue
+		}
+
+		if env.Type == "rematch_accept" {
+			if room == nil {
+				continue
+			}
+			room.mu.Lock()
+			if conn == room.creator || !room.rematchPending {
+				room.mu.Unlock()
+				continue
+			}
+			room.rematchPending = false
 			room.mu.Unlock()
 			broadcastStart(room)
+			continue
+		}
+
+		if env.Type == "rematch_decline" {
+			if room == nil {
+				continue
+			}
+			room.mu.Lock()
+			if conn == room.creator {
+				room.mu.Unlock()
+				continue
+			}
+			room.rematchPending = false
+			creator := room.creator
+			room.mu.Unlock()
+			if creator != nil {
+				creator.WriteMessage(websocket.TextMessage, []byte(`{"type":"rematch_declined"}`))
+			}
 			continue
 		}
 
