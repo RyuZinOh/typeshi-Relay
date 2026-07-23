@@ -256,6 +256,21 @@ func handleWS(w http.ResponseWriter, r *http.Request) {
 			}
 			continue
 		}
+		if env.Type == "rematch_request" {
+			if room == nil {
+				log.Println("rematch requested before joining any room, ignoring")
+				continue
+			}
+			room.mu.Lock()
+			if len(room.clients) < maxPlayersPerRoom {
+				room.mu.Unlock()
+				conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"error","message":"opponent not connected"}`))
+				continue
+			}
+			room.mu.Unlock()
+			broadcastStart(room)
+			continue
+		}
 
 		if room == nil {
 			log.Println("message before join, ignoring")
@@ -283,7 +298,7 @@ func handleWS(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		room.mu.Unlock()
-		log.Println("received from", username, ": ", string(msg))
+		// log.Println("received from", username, ": ", string(msg))
 	}
 }
 
