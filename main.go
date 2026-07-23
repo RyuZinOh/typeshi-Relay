@@ -45,6 +45,10 @@ type StartEnvelope struct {
 	StartAt  int64  `json:"startAt"`
 	Duration int    `json:"duration"`
 }
+type LeftEnvelope struct {
+	Type     string `json:"type"`
+	Username string `json:"username"`
+}
 
 func generateRoomCode() string {
 	roomsMu.Lock()
@@ -117,10 +121,25 @@ func handleWS(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		room.mu.Lock()
+		leavingUsername := room.clients[conn]
+		log.Println("cleanup: leaving username =", leavingUsername, "room =", room.code)
 		delete(room.clients, conn)
 		empty := len(room.clients) == 0
-		room.mu.Unlock()
+		// room.mu.Unlock()
 
+		if !empty {
+			env := LeftEnvelope{
+				Type:     "opponent_left",
+				Username: leavingUsername,
+			}
+
+			data, _ := json.Marshal(env)
+			log.Println("broadcasting opponent_left payload:", string(data))
+			for c := range room.clients {
+				c.WriteMessage(websocket.TextMessage, data)
+			}
+		}
+		room.mu.Unlock()
 		if empty {
 			roomsMu.Lock()
 			delete(rooms, room.code)
@@ -226,6 +245,15 @@ func handleWS(w http.ResponseWriter, r *http.Request) {
 				broadcastStart(room)
 			}
 
+			continue
+		}
+
+		if env.Type == "race_started" {
+			if room != nil {
+				room.mu.Lock()
+				room.started = true
+				room.mu.Unlock()
+			}
 			continue
 		}
 
